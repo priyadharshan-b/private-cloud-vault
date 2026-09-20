@@ -1,10 +1,14 @@
+import path from "node:path";
+import fs from "node:fs";
 import express, { type Express } from "express";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import pinoHttp from "pino-http";
 import router from "./routes";
 import { logger } from "./lib/logger";
 
 const app: Express = express();
+app.set("trust proxy", 1);
 
 app.use(
   pinoHttp({
@@ -25,14 +29,32 @@ app.use(
     },
   }),
 );
-app.use(cors());
-app.use((req, res, next) => {
+app.use(cors({ origin: true, credentials: true }));
+app.use(cookieParser());
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true }));
+
+app.use("/api", (req, res, next) => {
   res.setHeader("Cache-Control", "no-store");
   next();
 });
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
 app.use("/api", router);
+
+const publicDir = path.resolve(process.cwd(), "artifacts/private-cloud/dist/public");
+const indexFile = path.join(publicDir, "index.html");
+if (fs.existsSync(indexFile)) {
+  app.use(express.static(publicDir));
+  app.use((req, res, next) => {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      next();
+      return;
+    }
+    if (req.path.startsWith("/api")) {
+      next();
+      return;
+    }
+    res.sendFile(indexFile);
+  });
+}
 
 export default app;

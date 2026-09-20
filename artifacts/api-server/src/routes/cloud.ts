@@ -20,7 +20,13 @@ import {
 } from "@workspace/api-zod";
 import { clearSession, getSession, setSession, updateSession, type SessionData } from "../lib/session";
 import { hashPasscode, verifyPasscode } from "../lib/passcode";
-import { readJson, readSupabaseError, supabaseRequest } from "../lib/supabase";
+import {
+  absoluteStorageUrl,
+  publicAppUrl,
+  readJson,
+  supabaseAdminRequest,
+  supabaseRequest,
+} from "../lib/supabase";
 
 type SupabaseUser = {
   id: string;
@@ -44,7 +50,6 @@ type FileRow = {
   mime_type: string;
   file_size: number;
   folder_id?: string | null;
-  folder_path?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -56,6 +61,11 @@ type FolderRow = {
   created_at: string;
   updated_at: string;
 };
+
+const WEAK_PASSCODES = new Set(["000000", "111111", "123456", "654321", "012345", "987654"]);
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+const PKCE_COOKIE = "private_cloud_pkce";
+const RESET_COOKIE = "private_cloud_reset";
 
 const router: IRouter = Router();
 router.use(cookieParser());
@@ -69,15 +79,50 @@ function sessionUser(user: SupabaseUser) {
   };
 }
 
-async function getProfile(session: SessionData): Promise<ProfileRow | null> {
-  const response = await supabaseRequest(
-    `/rest/v1/profiles?select=id,email,full_name,avatar_url,passcode_hash&id=eq.${encodeURIComponent(session.userId)}&limit=1`,
-    {},
-    session.accessToken,
+function isWeakPasscode(value: string) {
+  return WEAK_PASSCODES.has(value) || /^(\d)\1{5}$/.test(value);
+}
+
+function cookieSettings() {
+  return {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax" as const,
+    path: "/",
+  };
+}
+
+async function getProfile(userId: string): Promise<ProfileRow | null> {
+  const response = await supabaseAdminRequest(
+    `/rest/v1/profiles?select=id,email,full_name,avatar_url,passcode_hash&id=eq.${encodeURIComponent(userId)}&limit=1`,
   );
   if (!response.ok) return null;
   const rows = await readJson<ProfileRow[]>(response);
   return rows[0] ?? null;
+}
+
+async function listUserFolders(userId: string, accessToken: string): Promise<FolderRow[]> {
+  const response = await supabaseRequest(
+    `/rest/v1/folders?select=id,name,parent_folder_id,created_at,updated_at&user_id=eq.${encodeURIComponent(userId)}&order=name.asc`,
+    {},
+    accessToken,
+  );
+  if (!response.ok) return [];
+  return readJson<FolderRow[]>(response);
+}
+
+function folderPath(folders: FolderRow[], folderId: string | null | undefined) {
+  if (!folderId) return "My Storage";
+  const byId = new Map(folders.map((folder) => [folder.id, folder]));
+  const parts: string[] = [];
+  const seen = new Set<string>();
+  let current = byId.get(folderId);
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    parts.unshift(current.name);
+    current = current.parent_folder_id ? byId.get(current.parent_folder_id) : undefined;
+  }
+  return parts.join(" / ") || "My Storage";
 }
 
 async function currentUser(session: SessionData): Promise<SupabaseUser | null> {
@@ -124,7 +169,7 @@ function authSession(session: SessionData | null, profile: ProfileRow | null, us
   };
 }
 
-function mapFile(row: FileRow) {
+function mapFile(row: FileRow, folders: FolderRow[]) {
   return {
     id: row.id,
     name: row.name,
@@ -132,7 +177,7 @@ function mapFile(row: FileRow) {
     mimeType: row.mime_type,
     fileSize: Number(row.file_size),
     folderId: row.folder_id ?? null,
-    folderPath: row.folder_path ?? "My Storage",
+    folderPath: folderPath(folders, row.folder_id),
     storagePath: row.storage_path,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -149,6 +194,31 @@ function mapFolder(row: FolderRow) {
   };
 }
 
+function beginPkce(res: express.Response) {
+  const verifier = crypto.randomBytes(32).toString("base64url");
+  const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
+  res.cookie(PKCE_COOKIE, verifier, { ...cookieSettings(), maxAge: 10 * 60 * 1000 });
+  return challenge;
+}
+
+async function establishSession(
+  res: express.Response,
+  auth: { access_token: string; refresh_token?: string; user: SupabaseUser },
+  extras: Partial<SessionData> = {},
+) {
+  const session: SessionData = {
+    accessToken: auth.access_token,
+    refreshToken: auth.refresh_token,
+    userId: auth.user.id,
+    vaultUnlocked: false,
+    failedAttempts: 0,
+    ...extras,
+  };
+  setSession(res, session);
+  const profile = await getProfile(session.userId);
+  return { session, profile };
+}
+
 router.get("/auth/session", async (req, res): Promise<void> => {
   const session = getSession(req);
   if (!session) {
@@ -156,9 +226,46 @@ router.get("/auth/session", async (req, res): Promise<void> => {
     return;
   }
   const user = await currentUser(session);
-  const profile = user ? await getProfile(session) : null;
+  const profile = user ? await getProfile(session.userId) : null;
   if (!user) clearSession(res);
   res.json(authSession(user ? session : null, profile, user));
+});
+
+router.post("/auth/signup", async (req, res): Promise<void> => {
+  const parsed = LoginWithEmailBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Enter a valid email and a password with at least 8 characters." });
+    return;
+  }
+  if (parsed.data.password.length < 8) {
+    res.status(400).json({ error: "Use a password with at least 8 characters." });
+    return;
+  }
+  const response = await supabaseRequest("/auth/v1/signup", {
+    method: "POST",
+    body: JSON.stringify({ email: parsed.data.email, password: parsed.data.password }),
+  });
+  if (!response.ok) {
+    res.status(400).json({ error: "That email could not be registered. Try signing in instead." });
+    return;
+  }
+  const auth = await readJson<{ access_token?: string; refresh_token?: string; user?: SupabaseUser }>(response);
+  if (!auth.access_token || !auth.user) {
+    res.json({
+      authenticated: false,
+      vaultUnlocked: false,
+      hasPasscode: false,
+      user: null,
+      error: "Check your email to confirm the account, then sign in.",
+    });
+    return;
+  }
+  const { session, profile } = await establishSession(res, {
+    access_token: auth.access_token,
+    refresh_token: auth.refresh_token,
+    user: auth.user,
+  });
+  res.status(201).json(authSession(session, profile, auth.user));
 });
 
 router.post("/auth/login", async (req, res): Promise<void> => {
@@ -179,30 +286,49 @@ router.post("/auth/login", async (req, res): Promise<void> => {
   }
 
   const auth = await readJson<{ access_token: string; refresh_token?: string; user: SupabaseUser }>(response);
-  const session: SessionData = {
-    accessToken: auth.access_token,
-    refreshToken: auth.refresh_token,
-    userId: auth.user.id,
-    vaultUnlocked: false,
-    failedAttempts: 0,
-  };
-  setSession(res, session);
-  const profile = await getProfile(session);
+  const { session, profile } = await establishSession(res, auth);
   res.json(authSession(session, profile, auth.user));
+});
+
+router.post("/auth/magic-link", async (req, res): Promise<void> => {
+  const email = typeof req.body?.email === "string" ? req.body.email.trim() : "";
+  if (!email.includes("@")) {
+    res.status(400).json({ error: "Enter a valid email address." });
+    return;
+  }
+  const challenge = beginPkce(res);
+  const redirectTo = `${publicAppUrl(req)}/api/auth/google/callback`;
+  const response = await supabaseRequest("/auth/v1/otp", {
+    method: "POST",
+    body: JSON.stringify({
+      email,
+      create_user: true,
+      data: {},
+      gotrue_meta_security: {},
+      options: { email_redirect_to: redirectTo },
+    }),
+  });
+  if (!response.ok) {
+    const fallback = await supabaseRequest("/auth/v1/magiclink", {
+      method: "POST",
+      body: JSON.stringify({ email, data: { redirect_to: redirectTo }, code_challenge: challenge, code_challenge_method: "s256" }),
+    });
+    if (!fallback.ok) {
+      res.status(502).json({ error: "We could not send a sign-in email just now." });
+      return;
+    }
+  }
+  res.json({ sent: true });
 });
 
 router.post("/auth/google", async (req, res): Promise<void> => {
   BeginGoogleLoginBody.safeParse(req.body ?? {});
-  const verifier = crypto.randomBytes(32).toString("base64url");
-  const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
-  res.cookie("private_cloud_pkce", verifier, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    maxAge: 10 * 60 * 1000,
-    path: "/",
-  });
-  res.json({ url: `/api/auth/google/start?challenge=${encodeURIComponent(challenge)}` });
+  const challenge = beginPkce(res);
+  const reset = Boolean(req.body?.reset);
+  if (reset) {
+    res.cookie(RESET_COOKIE, "1", { ...cookieSettings(), maxAge: 10 * 60 * 1000 });
+  }
+  res.json({ url: `/api/auth/google/start?challenge=${encodeURIComponent(challenge)}${reset ? "&reset=1" : ""}` });
 });
 
 router.get("/auth/google/start", async (req, res): Promise<void> => {
@@ -211,7 +337,7 @@ router.get("/auth/google/start", async (req, res): Promise<void> => {
     res.status(400).send("Google sign-in could not be started.");
     return;
   }
-  const redirectTo = `${req.protocol}://${req.get("host")}/api/auth/google/callback`;
+  const redirectTo = `${publicAppUrl(req)}/api/auth/google/callback`;
   const response = await supabaseRequest(
     `/auth/v1/authorize?provider=google&redirect_to=${encodeURIComponent(redirectTo)}&code_challenge=${encodeURIComponent(challenge)}&code_challenge_method=S256`,
     { method: "GET", redirect: "manual" },
@@ -226,10 +352,12 @@ router.get("/auth/google/start", async (req, res): Promise<void> => {
 
 router.get("/auth/google/callback", async (req, res): Promise<void> => {
   const code = typeof req.query.code === "string" ? req.query.code : "";
-  const verifier = req.cookies?.private_cloud_pkce as string | undefined;
-  res.clearCookie("private_cloud_pkce", { httpOnly: true, sameSite: "lax", path: "/" });
+  const verifier = req.cookies?.[PKCE_COOKIE] as string | undefined;
+  const reset = req.cookies?.[RESET_COOKIE] === "1" || req.query.reset === "1";
+  res.clearCookie(PKCE_COOKIE, cookieSettings());
+  res.clearCookie(RESET_COOKIE, cookieSettings());
   if (!code || !verifier) {
-    res.redirect("/");
+    res.redirect("/?auth_error=google");
     return;
   }
 
@@ -238,37 +366,58 @@ router.get("/auth/google/callback", async (req, res): Promise<void> => {
     body: JSON.stringify({ auth_code: code, code_verifier: verifier }),
   });
   if (!response.ok) {
-    req.log.warn({ status: response.status }, "Google OAuth callback exchange failed");
+    req.log.warn({ status: response.status }, "OAuth callback exchange failed");
     res.redirect("/?auth_error=google");
     return;
   }
 
   const auth = await readJson<{ access_token: string; refresh_token?: string; user: SupabaseUser }>(response);
-  setSession(res, {
-    accessToken: auth.access_token,
-    refreshToken: auth.refresh_token,
-    userId: auth.user.id,
-    vaultUnlocked: false,
-    failedAttempts: 0,
-  });
-  res.redirect("/");
+  await establishSession(res, auth, { resetVerified: reset });
+  res.redirect(reset ? "/?reset=1" : "/");
 });
 
-router.post("/auth/logout", (req, res): void => {
+router.post("/auth/logout", (_req, res): void => {
   clearSession(res);
   res.sendStatus(204);
+});
+
+router.post("/vault/verify-account", async (req, res): Promise<void> => {
+  const session = await requireSession(req, res);
+  if (!session) return;
+  const user = await currentUser(session);
+  const password = typeof req.body?.password === "string" ? req.body.password : "";
+  if (!user?.email || !password) {
+    res.status(400).json({ error: "Re-enter your account password to reset the passcode." });
+    return;
+  }
+  const response = await supabaseRequest("/auth/v1/token?grant_type=password", {
+    method: "POST",
+    body: JSON.stringify({ email: user.email, password }),
+  });
+  if (!response.ok) {
+    res.status(401).json({ error: "That account password was not recognized." });
+    return;
+  }
+  updateSession(res, { ...session, resetVerified: true, vaultUnlocked: false });
+  res.json({ verified: true });
 });
 
 router.post("/vault/passcode", async (req, res): Promise<void> => {
   const session = await requireSession(req, res);
   if (!session) return;
   const parsed = CreatePasscodeBody.safeParse(req.body);
-  if (!parsed.success || parsed.data.passcode === "000000") {
-    res.status(400).json({ error: "Choose a six-digit passcode that is not all zeroes." });
+  if (!parsed.success || isWeakPasscode(parsed.data.passcode)) {
+    res.status(400).json({ error: "Choose a six-digit passcode that is not a repeated or obvious number." });
     return;
   }
 
-  const response = await supabaseRequest(
+  const existing = await getProfile(session.userId);
+  if (existing?.passcode_hash && !session.resetVerified) {
+    res.status(403).json({ error: "Verify your account before replacing an existing passcode." });
+    return;
+  }
+
+  const response = await supabaseAdminRequest(
     `/rest/v1/profiles?id=eq.${encodeURIComponent(session.userId)}`,
     {
       method: "PATCH",
@@ -276,9 +425,9 @@ router.post("/vault/passcode", async (req, res): Promise<void> => {
       body: JSON.stringify({
         passcode_hash: hashPasscode(parsed.data.passcode),
         passcode_created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
       }),
     },
-    session.accessToken,
   );
   if (!response.ok) {
     req.log.error({ status: response.status }, "Could not save vault passcode");
@@ -286,10 +435,10 @@ router.post("/vault/passcode", async (req, res): Promise<void> => {
     return;
   }
 
-  const updated = { ...session, vaultUnlocked: true, failedAttempts: 0, lockedUntil: undefined };
+  const updated = { ...session, vaultUnlocked: true, failedAttempts: 0, lockedUntil: undefined, resetVerified: false };
   updateSession(res, updated);
   const user = await currentUser(updated);
-  const profile = await getProfile(updated);
+  const profile = await getProfile(updated.userId);
   res.json(authSession(updated, profile, user));
 });
 
@@ -306,7 +455,7 @@ router.post("/vault/unlock", async (req, res): Promise<void> => {
     return;
   }
 
-  const profile = await getProfile(session);
+  const profile = await getProfile(session.userId);
   if (!profile?.passcode_hash || !verifyPasscode(parsed.data.passcode, profile.passcode_hash)) {
     const failedAttempts = session.failedAttempts + 1;
     const lockedUntil = failedAttempts >= 5 ? Date.now() + 60_000 : undefined;
@@ -329,7 +478,7 @@ router.post("/vault/lock", async (req, res): Promise<void> => {
   const updated = { ...session, vaultUnlocked: false };
   updateSession(res, updated);
   const user = await currentUser(updated);
-  const profile = await getProfile(updated);
+  const profile = await getProfile(updated.userId);
   res.json(authSession(updated, profile, user));
 });
 
@@ -341,13 +490,21 @@ router.get("/files", async (req, res): Promise<void> => {
     res.status(400).json({ error: "Invalid file filters." });
     return;
   }
+  const folders = await listUserFolders(session.userId, session.accessToken);
+  const matchingFolderIds = parsed.data.search
+    ? folders.filter((folder) => folder.name.toLowerCase().includes(parsed.data.search!.toLowerCase())).map((folder) => folder.id)
+    : [];
   const params = new URLSearchParams({
-    select: "id,name,original_name,storage_path,mime_type,file_size,folder_id,folder_path,created_at,updated_at",
+    select: "id,name,original_name,storage_path,mime_type,file_size,folder_id,created_at,updated_at",
     user_id: `eq.${session.userId}`,
     order: "updated_at.desc",
     limit: String(parsed.data.limit ?? 50),
   });
-  if (parsed.data.search) params.set("name", `ilike.*${parsed.data.search}*`);
+  if (parsed.data.search) {
+    const safe = parsed.data.search.replace(/[,()]/g, " ").trim();
+    const folderFilter = matchingFolderIds.length ? `,folder_id.in.(${matchingFolderIds.join(",")})` : "";
+    params.set("or", `(name.ilike.*${safe}*,original_name.ilike.*${safe}*,mime_type.ilike.*${safe}*${folderFilter})`);
+  }
   if (parsed.data.folderId) params.set("folder_id", `eq.${parsed.data.folderId}`);
 
   const response = await supabaseRequest(`/rest/v1/files?${params.toString()}`, {}, session.accessToken);
@@ -356,7 +513,7 @@ router.get("/files", async (req, res): Promise<void> => {
     return;
   }
   const rows = await readJson<FileRow[]>(response);
-  res.json(rows.map(mapFile));
+  res.json(rows.map((row) => mapFile(row, folders)));
 });
 
 router.post("/files", async (req, res): Promise<void> => {
@@ -365,6 +522,10 @@ router.post("/files", async (req, res): Promise<void> => {
   const parsed = CreateFileBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "File metadata is incomplete." });
+    return;
+  }
+  if (!parsed.data.storagePath.startsWith(`${session.userId}/`)) {
+    res.status(403).json({ error: "You can only save files in your own storage." });
     return;
   }
   const response = await supabaseRequest("/rest/v1/files", {
@@ -386,7 +547,8 @@ router.post("/files", async (req, res): Promise<void> => {
     return;
   }
   const [row] = await readJson<FileRow[]>(response);
-  res.status(201).json(mapFile(row));
+  const folders = await listUserFolders(session.userId, session.accessToken);
+  res.status(201).json(mapFile(row, folders));
 });
 
 router.patch("/files/:id", async (req, res): Promise<void> => {
@@ -416,7 +578,8 @@ router.patch("/files/:id", async (req, res): Promise<void> => {
     res.status(404).json({ error: "File not found." });
     return;
   }
-  res.json(mapFile(row));
+  const folders = await listUserFolders(session.userId, session.accessToken);
+  res.json(mapFile(row, folders));
 });
 
 router.delete("/files/:id", async (req, res): Promise<void> => {
@@ -426,6 +589,15 @@ router.delete("/files/:id", async (req, res): Promise<void> => {
   if (!params.success) {
     res.status(400).json({ error: "Invalid file." });
     return;
+  }
+  const lookup = await supabaseRequest(
+    `/rest/v1/files?select=storage_path&id=eq.${encodeURIComponent(params.data.id)}&user_id=eq.${encodeURIComponent(session.userId)}&limit=1`,
+    {},
+    session.accessToken,
+  );
+  const [row] = lookup.ok ? await readJson<Array<{ storage_path: string }>>(lookup) : [];
+  if (row?.storage_path?.startsWith(`${session.userId}/`)) {
+    await supabaseRequest(`/storage/v1/object/user-files/${row.storage_path}`, { method: "DELETE" }, session.accessToken);
   }
   const response = await supabaseRequest(
     `/rest/v1/files?id=eq.${encodeURIComponent(params.data.id)}&user_id=eq.${encodeURIComponent(session.userId)}`,
@@ -463,15 +635,15 @@ router.get("/files/:id/download", async (req, res): Promise<void> => {
   }
   const signed = await supabaseRequest(
     `/storage/v1/object/sign/user-files/${row.storage_path}`,
-    { method: "POST", body: JSON.stringify({ expiresIn: 300 }) },
+    { method: "POST", body: JSON.stringify({ expiresIn: 120 }) },
     session.accessToken,
   );
   if (!signed.ok) {
     res.status(502).json({ error: "A download link could not be created." });
     return;
   }
-  const payload = await readJson<{ signedURL?: string }>(signed);
-  res.json({ url: payload.signedURL ?? "" });
+  const payload = await readJson<{ signedURL?: string; signedUrl?: string }>(signed);
+  res.json({ url: absoluteStorageUrl(payload.signedURL || payload.signedUrl || "") });
 });
 
 router.post("/files/upload-url", async (req, res): Promise<void> => {
@@ -480,6 +652,10 @@ router.post("/files/upload-url", async (req, res): Promise<void> => {
   const parsed = RequestUploadUrlBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid upload." });
+    return;
+  }
+  if (parsed.data.fileSize > MAX_UPLOAD_BYTES) {
+    res.status(400).json({ error: "Files larger than 50 MB cannot be uploaded in this version." });
     return;
   }
   const safeName = parsed.data.name.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 180);
@@ -491,18 +667,23 @@ router.post("/files/upload-url", async (req, res): Promise<void> => {
 router.put("/files/upload", express.raw({ type: "*/*", limit: "50mb" }), async (req, res): Promise<void> => {
   const session = await requireVault(req, res);
   if (!session) return;
-  const path = typeof req.query.path === "string" ? req.query.path : "";
+  const objectPath = typeof req.query.path === "string" ? req.query.path : "";
   const contentType = typeof req.query.contentType === "string" ? req.query.contentType : "application/octet-stream";
-  if (!path || !path.startsWith(`${session.userId}/`)) {
+  if (!objectPath || !objectPath.startsWith(`${session.userId}/`)) {
     res.status(400).json({ error: "Invalid upload path." });
     return;
   }
+  const body = req.body as Buffer;
+  if (body?.length > MAX_UPLOAD_BYTES) {
+    res.status(400).json({ error: "Files larger than 50 MB cannot be uploaded in this version." });
+    return;
+  }
   const response = await supabaseRequest(
-    `/storage/v1/object/user-files/${path}`,
+    `/storage/v1/object/user-files/${objectPath}`,
     {
       method: "POST",
       headers: { "Content-Type": contentType, "x-upsert": "false" },
-      body: req.body as Buffer,
+      body,
     },
     session.accessToken,
   );
@@ -517,16 +698,7 @@ router.put("/files/upload", express.raw({ type: "*/*", limit: "50mb" }), async (
 router.get("/folders", async (req, res): Promise<void> => {
   const session = await requireVault(req, res);
   if (!session) return;
-  const response = await supabaseRequest(
-    `/rest/v1/folders?select=id,name,parent_folder_id,created_at,updated_at&user_id=eq.${encodeURIComponent(session.userId)}&order=name.asc`,
-    {},
-    session.accessToken,
-  );
-  if (!response.ok) {
-    res.status(502).json({ error: "Folders are temporarily unavailable." });
-    return;
-  }
-  const rows = await readJson<FolderRow[]>(response);
+  const rows = await listUserFolders(session.userId, session.accessToken);
   res.json(rows.map(mapFolder));
 });
 

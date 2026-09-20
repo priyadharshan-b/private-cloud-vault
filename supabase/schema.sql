@@ -1,4 +1,5 @@
--- Run this in the Supabase SQL editor before using Private Cloud.
+-- Run this entire file in the Supabase SQL Editor once per project.
+
 create extension if not exists pgcrypto;
 
 create table if not exists public.profiles (
@@ -36,8 +37,10 @@ create table if not exists public.files (
 
 create index if not exists profiles_user_id_idx on public.profiles(id);
 create index if not exists folders_user_id_idx on public.folders(user_id);
+create index if not exists folders_parent_idx on public.folders(parent_folder_id);
 create index if not exists files_user_id_updated_at_idx on public.files(user_id, updated_at desc);
 create index if not exists files_user_id_name_idx on public.files(user_id, name);
+create index if not exists files_user_id_folder_idx on public.files(user_id, folder_id);
 
 alter table public.profiles enable row level security;
 alter table public.folders enable row level security;
@@ -54,6 +57,13 @@ create policy "folders own rows" on public.folders
 drop policy if exists "files own rows" on public.files;
 create policy "files own rows" on public.files
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- Authenticated users must not read or write passcode hashes from the browser.
+revoke all on table public.profiles from anon, authenticated;
+grant select (id, email, full_name, avatar_url, passcode_created_at, created_at, updated_at)
+  on table public.profiles to authenticated;
+grant update (email, full_name, avatar_url, updated_at)
+  on table public.profiles to authenticated;
 
 create or replace function public.handle_new_user()
 returns trigger
@@ -82,8 +92,10 @@ create trigger on_auth_user_created
   after insert on auth.users
   for each row execute procedure public.handle_new_user();
 
--- Create a private bucket named user-files in Storage.
--- Apply the following Storage policies after creating it:
+insert into storage.buckets (id, name, public)
+values ('user-files', 'user-files', false)
+on conflict (id) do update set public = false;
+
 drop policy if exists "user-files read own objects" on storage.objects;
 create policy "user-files read own objects" on storage.objects
   for select to authenticated

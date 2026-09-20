@@ -2,10 +2,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
 import {
   ArrowDownToLine,
-  ArrowLeft,
   Check,
   ChevronRight,
   Cloud,
+  Eye,
+  EyeOff,
   File,
   FileArchive,
   FileAudio,
@@ -15,7 +16,6 @@ import {
   FileVideo,
   Folder,
   FolderPlus,
-  GripVertical,
   HardDrive,
   KeyRound,
   LayoutGrid,
@@ -31,7 +31,6 @@ import {
   Sparkles,
   Trash2,
   UploadCloud,
-  UserRound,
   X,
 } from 'lucide-react';
 import {
@@ -185,23 +184,76 @@ function AccessError({ error, retry }: { error: unknown; retry: () => void }) {
   );
 }
 
+async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetch(path, {
+    credentials: 'include',
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...(init.headers || {}) },
+  });
+  if (!response.ok) {
+    let message = 'Something went quiet. Try again.';
+    try {
+      const body = await response.json();
+      if (body?.error) message = String(body.error);
+    } catch {
+      // keep default
+    }
+    throw new Error(message);
+  }
+  if (response.status === 204) return undefined as T;
+  return response.json() as Promise<T>;
+}
+
 function LoginCard() {
   const [, setLocation] = useLocation();
   const queryClient = useQueryClient();
   const login = useLoginWithEmail();
   const google = useBeginGoogleLogin();
+  const [mode, setMode] = useState<'signin' | 'signup' | 'magic'>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [notice, setNotice] = useState('');
+  const [busy, setBusy] = useState(false);
 
-  const submit = (event: FormEvent) => {
+  const applySession = (session: { authenticated?: boolean; vaultUnlocked?: boolean }) => {
+    queryClient.setQueryData(getGetAuthSessionQueryKey(), session);
+    if (session.vaultUnlocked) setLocation('/dashboard');
+  };
+
+  const submit = async (event: FormEvent) => {
     event.preventDefault();
     setNotice('');
+    if (mode === 'magic') {
+      setBusy(true);
+      try {
+        await apiRequest('/api/auth/magic-link', { method: 'POST', body: JSON.stringify({ email }) });
+        setNotice('Check your email for a sign-in link.');
+      } catch (error) {
+        setNotice(getErrorMessage(error));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    if (mode === 'signup') {
+      setBusy(true);
+      try {
+        const session = await apiRequest<{ authenticated?: boolean; vaultUnlocked?: boolean; error?: string }>('/api/auth/signup', {
+          method: 'POST',
+          body: JSON.stringify({ email, password }),
+        });
+        if (session.error) setNotice(session.error);
+        else applySession(session);
+      } catch (error) {
+        setNotice(getErrorMessage(error));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
     login.mutate({ data: { email, password } }, {
-      onSuccess: (session) => {
-        queryClient.setQueryData(getGetAuthSessionQueryKey(), session);
-        if (session.vaultUnlocked) setLocation('/dashboard');
-      },
+      onSuccess: applySession,
       onError: (error) => setNotice(getErrorMessage(error)),
     });
   };
@@ -234,18 +286,28 @@ function LoginCard() {
         <div className="p-7 sm:p-12 lg:p-14">
           <div className="mb-10 lg:hidden"><BrandMark compact /></div>
           <p className="animate-rise-in font-mono text-[10px] uppercase tracking-[.22em] text-[hsl(var(--primary))]">Private access</p>
-          <h2 className="animate-rise-in delay-1 mt-4 font-serif text-[42px] font-bold leading-[.98] tracking-[-.055em]">Welcome back.</h2>
+          <h2 className="animate-rise-in delay-1 mt-4 font-serif text-[42px] font-bold leading-[.98] tracking-[-.055em]">{mode === 'signup' ? 'Create your room.' : 'Welcome back.'}</h2>
           <p className="animate-rise-in delay-2 mt-4 max-w-[350px] text-sm leading-6 text-[hsl(var(--muted-foreground))]">Sign in to return to the quiet side of your cloud.</p>
-          <form onSubmit={submit} className="mt-9 space-y-4">
+          <div className="mt-6 flex gap-2 text-xs font-semibold">
+            <button type="button" onClick={() => setMode('signin')} className={`rounded-full px-3 py-1.5 ${mode === 'signin' ? 'bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))]' : 'bg-[hsl(var(--muted))]'}`}>Sign in</button>
+            <button type="button" onClick={() => setMode('signup')} className={`rounded-full px-3 py-1.5 ${mode === 'signup' ? 'bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))]' : 'bg-[hsl(var(--muted))]'}`}>Create account</button>
+            <button type="button" onClick={() => setMode('magic')} className={`rounded-full px-3 py-1.5 ${mode === 'magic' ? 'bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))]' : 'bg-[hsl(var(--muted))]'}`}>Email link</button>
+          </div>
+          <form onSubmit={submit} className="mt-6 space-y-4">
             <label className="block text-xs font-semibold text-[hsl(var(--foreground))]">Email address
               <input className="focus-ring mt-2 h-12 w-full rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--background)/.72)] px-4 text-sm outline-none transition-colors placeholder:text-[hsl(var(--muted-foreground)/.65)] focus:border-[hsl(var(--accent))]" type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" data-testid="input-email" />
             </label>
-            <label className="block text-xs font-semibold text-[hsl(var(--foreground))]">Password
-              <input className="focus-ring mt-2 h-12 w-full rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--background)/.72)] px-4 text-sm outline-none transition-colors placeholder:text-[hsl(var(--muted-foreground)/.65)] focus:border-[hsl(var(--accent))]" type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Your account password" data-testid="input-password" />
-            </label>
+            {mode !== 'magic' && (
+              <label className="block text-xs font-semibold text-[hsl(var(--foreground))]">Password
+                <span className="relative mt-2 block">
+                  <input className="focus-ring h-12 w-full rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--background)/.72)] px-4 pr-12 text-sm outline-none transition-colors placeholder:text-[hsl(var(--muted-foreground)/.65)] focus:border-[hsl(var(--accent))]" type={showPassword ? 'text' : 'password'} autoComplete={mode === 'signup' ? 'new-password' : 'current-password'} required minLength={mode === 'signup' ? 8 : 1} value={password} onChange={(e) => setPassword(e.target.value)} placeholder={mode === 'signup' ? 'At least 8 characters' : 'Your account password'} data-testid="input-password" />
+                  <button type="button" className="absolute right-3 top-3 text-[hsl(var(--muted-foreground))]" onClick={() => setShowPassword((value) => !value)} data-testid="button-toggle-password">{showPassword ? <EyeOff size={16} /> : <Eye size={16} />}</button>
+                </span>
+              </label>
+            )}
             {notice && <p className="rounded-xl bg-[hsl(var(--destructive)/.1)] px-3 py-2 text-xs leading-5 text-[hsl(var(--destructive))]" data-testid="status-login-error">{notice}</p>}
-            <button className="focus-ring flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] text-sm font-semibold text-[hsl(var(--primary-foreground))] shadow-[0_8px_18px_hsl(var(--primary)/.18)] transition-all hover:-translate-y-0.5 hover:shadow-[0_12px_24px_hsl(var(--primary)/.24)] disabled:cursor-wait disabled:opacity-60" disabled={login.isPending} data-testid="button-login">
-              {login.isPending ? <><RefreshCw size={16} className="animate-spin" /> Checking</> : <>Enter your cloud <ChevronRight size={16} /></>}
+            <button className="focus-ring flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] text-sm font-semibold text-[hsl(var(--primary-foreground))] shadow-[0_8px_18px_hsl(var(--primary)/.18)] transition-all hover:-translate-y-0.5 hover:shadow-[0_12px_24px_hsl(var(--primary)/.24)] disabled:cursor-wait disabled:opacity-60" disabled={login.isPending || busy} data-testid="button-login">
+              {(login.isPending || busy) ? <><RefreshCw size={16} className="animate-spin" /> Checking</> : <>{mode === 'magic' ? 'Send sign-in link' : mode === 'signup' ? 'Create account' : 'Enter your cloud'} <ChevronRight size={16} /></>}
             </button>
           </form>
           <div className="my-6 flex items-center gap-3 text-[10px] uppercase tracking-[.2em] text-[hsl(var(--muted-foreground)/.65)]"><span className="h-px flex-1 bg-[hsl(var(--border))]" />or<span className="h-px flex-1 bg-[hsl(var(--border))]" /></div>
@@ -260,12 +322,13 @@ function LoginCard() {
   );
 }
 
-function PasscodeCard({ sessionEmail }: { sessionEmail?: string }) {
+function PasscodeCard({ sessionEmail, resetting = false }: { sessionEmail?: string; resetting?: boolean }) {
   const queryClient = useQueryClient();
   const createPasscode = useCreatePasscode();
   const logout = useLogout();
   const [passcode, setPasscode] = useState('');
   const [confirm, setConfirm] = useState('');
+  const [show, setShow] = useState(false);
   const [notice, setNotice] = useState('');
   const [, setLocation] = useLocation();
 
@@ -292,14 +355,17 @@ function PasscodeCard({ sessionEmail }: { sessionEmail?: string }) {
       <div className="mx-auto max-w-[540px] animate-rise-in rounded-[30px] border border-[hsl(var(--border))] bg-[hsl(var(--card)/.82)] p-8 shadow-[var(--shadow-lg)] sm:p-12">
         <div className="mb-9 flex size-14 items-center justify-center rounded-2xl bg-[hsl(var(--primary)/.11)] text-[hsl(var(--primary))]"><KeyRound size={26} /></div>
         <p className="font-mono text-[10px] uppercase tracking-[.22em] text-[hsl(var(--primary))]">One more private layer</p>
-        <h1 className="mt-4 font-serif text-[42px] font-bold leading-[.98] tracking-[-.055em]">Make this space yours.</h1>
+        <h1 className="mt-4 font-serif text-[42px] font-bold leading-[.98] tracking-[-.055em]">{resetting ? 'Choose a new passcode.' : 'Make this space yours.'}</h1>
         <p className="mt-4 text-sm leading-6 text-[hsl(var(--muted-foreground))]">Set a six-digit passcode for {sessionEmail || 'your account'}. You’ll use it each time you return.</p>
         <form className="mt-9 space-y-4" onSubmit={submit}>
           <label className="block text-xs font-semibold">New passcode
-            <input inputMode="numeric" maxLength={6} pattern="[0-9]{6}" required autoFocus className="focus-ring mt-2 h-14 w-full rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--background)/.72)] px-4 font-mono text-xl tracking-[.45em] outline-none focus:border-[hsl(var(--accent))]" type="password" value={passcode} onChange={(e) => setPasscode(e.target.value.replace(/\D/g, '').slice(0, 6))} data-testid="input-create-passcode" />
+            <span className="relative mt-2 block">
+              <input inputMode="numeric" maxLength={6} pattern="[0-9]{6}" required autoFocus className="focus-ring h-14 w-full rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--background)/.72)] px-4 pr-12 font-mono text-xl tracking-[.45em] outline-none focus:border-[hsl(var(--accent))]" type={show ? 'text' : 'password'} value={passcode} onChange={(e) => setPasscode(e.target.value.replace(/\D/g, '').slice(0, 6))} data-testid="input-create-passcode" />
+              <button type="button" className="absolute right-3 top-4 text-[hsl(var(--muted-foreground))]" onClick={() => setShow((value) => !value)}>{show ? <EyeOff size={16} /> : <Eye size={16} />}</button>
+            </span>
           </label>
           <label className="block text-xs font-semibold">Confirm passcode
-            <input inputMode="numeric" maxLength={6} pattern="[0-9]{6}" required className="focus-ring mt-2 h-14 w-full rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--background)/.72)] px-4 font-mono text-xl tracking-[.45em] outline-none focus:border-[hsl(var(--accent))]" type="password" value={confirm} onChange={(e) => setConfirm(e.target.value.replace(/\D/g, '').slice(0, 6))} data-testid="input-confirm-passcode" />
+            <input inputMode="numeric" maxLength={6} pattern="[0-9]{6}" required className="focus-ring mt-2 h-14 w-full rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--background)/.72)] px-4 font-mono text-xl tracking-[.45em] outline-none focus:border-[hsl(var(--accent))]" type={show ? 'text' : 'password'} value={confirm} onChange={(e) => setConfirm(e.target.value.replace(/\D/g, '').slice(0, 6))} data-testid="input-confirm-passcode" />
           </label>
           {notice && <p className="rounded-xl bg-[hsl(var(--destructive)/.1)] px-3 py-2 text-xs text-[hsl(var(--destructive))]" data-testid="status-passcode-error">{notice}</p>}
           <button className="focus-ring mt-2 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] text-sm font-semibold text-[hsl(var(--primary-foreground))] transition-transform hover:-translate-y-0.5 disabled:opacity-60" disabled={createPasscode.isPending} data-testid="button-create-passcode">
@@ -312,11 +378,12 @@ function PasscodeCard({ sessionEmail }: { sessionEmail?: string }) {
   );
 }
 
-function UnlockCard({ sessionEmail }: { sessionEmail?: string }) {
+function UnlockCard({ sessionEmail, onForgot }: { sessionEmail?: string; onForgot: () => void }) {
   const queryClient = useQueryClient();
   const unlock = useUnlockVault();
   const logout = useLogout();
   const [passcode, setPasscode] = useState('');
+  const [show, setShow] = useState(false);
   const [notice, setNotice] = useState('');
   const [, setLocation] = useLocation();
 
@@ -338,13 +405,66 @@ function UnlockCard({ sessionEmail }: { sessionEmail?: string }) {
         <h1 className="mt-4 font-serif text-[42px] font-bold leading-[.98] tracking-[-.055em]">A quiet minute.</h1>
         <p className="mt-4 text-sm leading-6 text-[hsl(var(--muted-foreground))]">Enter your passcode to open the private room for {sessionEmail || 'your files'}.</p>
         <form className="mt-9" onSubmit={submit}>
-          <input inputMode="numeric" maxLength={6} pattern="[0-9]{6}" required autoFocus className="focus-ring h-16 w-full rounded-2xl border border-[hsl(var(--border))] bg-[hsl(var(--background)/.72)] px-4 text-center font-mono text-2xl tracking-[.55em] outline-none focus:border-[hsl(var(--accent))]" type="password" value={passcode} onChange={(e) => setPasscode(e.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="······" data-testid="input-unlock-passcode" />
+          <span className="relative block">
+            <input inputMode="numeric" maxLength={6} pattern="[0-9]{6}" required autoFocus className="focus-ring h-16 w-full rounded-2xl border border-[hsl(var(--border))] bg-[hsl(var(--background)/.72)] px-4 pr-12 text-center font-mono text-2xl tracking-[.55em] outline-none focus:border-[hsl(var(--accent))]" type={show ? 'text' : 'password'} value={passcode} onChange={(e) => setPasscode(e.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="······" data-testid="input-unlock-passcode" />
+            <button type="button" className="absolute right-4 top-5 text-[hsl(var(--muted-foreground))]" onClick={() => setShow((value) => !value)}>{show ? <EyeOff size={16} /> : <Eye size={16} />}</button>
+          </span>
           {notice && <p className="mt-3 rounded-xl bg-[hsl(var(--destructive)/.1)] px-3 py-2 text-xs text-[hsl(var(--destructive))]" data-testid="status-unlock-error">{notice}</p>}
           <button className="focus-ring mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] text-sm font-semibold text-[hsl(var(--primary-foreground))] transition-transform hover:-translate-y-0.5 disabled:opacity-60" disabled={unlock.isPending} data-testid="button-unlock">
             {unlock.isPending ? <><RefreshCw size={16} className="animate-spin" /> Opening vault</> : <>Unlock vault <ChevronRight size={16} /></>}
           </button>
         </form>
-        <button onClick={signOut} className="focus-ring mx-auto mt-6 flex items-center gap-2 text-xs font-semibold text-[hsl(var(--muted-foreground))] transition-colors hover:text-[hsl(var(--foreground))]" data-testid="button-logout-unlock"><LogOut size={14} /> Sign out</button>
+        <button onClick={onForgot} className="focus-ring mx-auto mt-5 block text-xs font-semibold text-[hsl(var(--primary))]" data-testid="button-forgot-passcode">Forgot passcode?</button>
+        <button onClick={signOut} className="focus-ring mx-auto mt-3 flex items-center gap-2 text-xs font-semibold text-[hsl(var(--muted-foreground))] transition-colors hover:text-[hsl(var(--foreground))]" data-testid="button-logout-unlock"><LogOut size={14} /> Sign out</button>
+      </div>
+    </AccessShell>
+  );
+}
+
+function VerifyResetCard({ sessionEmail, onVerified }: { sessionEmail?: string; onVerified: () => void }) {
+  const queryClient = useQueryClient();
+  const logout = useLogout();
+  const [password, setPassword] = useState('');
+  const [notice, setNotice] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [, setLocation] = useLocation();
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setNotice('');
+    try {
+      await apiRequest('/api/vault/verify-account', { method: 'POST', body: JSON.stringify({ password }) });
+      onVerified();
+    } catch (error) {
+      setNotice(getErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <AccessShell>
+      <div className="mx-auto max-w-[540px] animate-rise-in rounded-[30px] border border-[hsl(var(--border))] bg-[hsl(var(--card)/.82)] p-8 shadow-[var(--shadow-lg)] sm:p-12">
+        <p className="font-mono text-[10px] uppercase tracking-[.22em] text-[hsl(var(--primary))]">Passcode recovery</p>
+        <h1 className="mt-4 font-serif text-[38px] font-bold leading-[.98] tracking-[-.055em]">Prove this is your account.</h1>
+        <p className="mt-4 text-sm leading-6 text-[hsl(var(--muted-foreground))]">We will not reset a passcode from an email address alone. Re-enter the password for {sessionEmail || 'this account'}, or sign in with Google again.</p>
+        <form className="mt-8 space-y-4" onSubmit={submit}>
+          <label className="block text-xs font-semibold">Account password
+            <input className="focus-ring mt-2 h-12 w-full rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--background)/.72)] px-4 text-sm outline-none" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required data-testid="input-reset-password" />
+          </label>
+          {notice && <p className="rounded-xl bg-[hsl(var(--destructive)/.1)] px-3 py-2 text-xs text-[hsl(var(--destructive))]">{notice}</p>}
+          <button className="focus-ring flex h-12 w-full items-center justify-center rounded-xl bg-[hsl(var(--primary))] text-sm font-semibold text-[hsl(var(--primary-foreground))]" disabled={busy}>{busy ? 'Checking…' : 'Verify and reset passcode'}</button>
+        </form>
+        <button onClick={async () => {
+          try {
+            const result = await apiRequest<{ url: string }>('/api/auth/google', { method: 'POST', body: JSON.stringify({ reset: true }) });
+            window.location.href = result.url;
+          } catch (error) {
+            setNotice(getErrorMessage(error));
+          }
+        }} className="focus-ring mt-4 flex h-12 w-full items-center justify-center rounded-xl border border-[hsl(var(--border))] text-sm font-semibold">Continue with Google to verify</button>
+        <button onClick={() => logout.mutate(undefined, { onSuccess: () => { queryClient.removeQueries({ queryKey: getGetAuthSessionQueryKey() }); setLocation('/'); } })} className="mx-auto mt-6 flex items-center gap-2 text-xs font-semibold text-[hsl(var(--muted-foreground))]"><LogOut size={14} /> Sign out</button>
       </div>
     </AccessShell>
   );
@@ -354,6 +474,8 @@ function PrivateAccess() {
   const [, setLocation] = useLocation();
   const sessionQuery = useGetAuthSession({ query: { queryKey: getGetAuthSessionQueryKey() } });
   const session = sessionQuery.data;
+  const [resetting, setResetting] = useState(() => new URLSearchParams(window.location.search).get('reset') === '1');
+  const [forgot, setForgot] = useState(false);
 
   useEffect(() => {
     if (session?.authenticated && session.vaultUnlocked) setLocation('/dashboard');
@@ -362,8 +484,9 @@ function PrivateAccess() {
   if (sessionQuery.isLoading) return <AccessLoading />;
   if (sessionQuery.isError) return <AccessError error={sessionQuery.error} retry={() => sessionQuery.refetch()} />;
   if (!session?.authenticated) return <LoginCard />;
-  if (!session.hasPasscode) return <PasscodeCard sessionEmail={session.user?.email} />;
-  return <UnlockCard sessionEmail={session.user?.email} />;
+  if (forgot && session.hasPasscode && !resetting) return <VerifyResetCard sessionEmail={session.user?.email} onVerified={() => setResetting(true)} />;
+  if (!session.hasPasscode || resetting) return <PasscodeCard sessionEmail={session.user?.email} resetting={resetting || !session.hasPasscode} />;
+  return <UnlockCard sessionEmail={session.user?.email} onForgot={() => setForgot(true)} />;
 }
 
 function SkeletonRows() {
@@ -430,7 +553,14 @@ function WorkspaceSidebar({ activeFolderId, folders, storage, onSelectFolder, on
         <p className="mb-3 px-3 font-mono text-[9px] uppercase tracking-[.22em] text-[hsl(var(--sidebar-foreground)/.45)]">Your rooms</p>
         <button onClick={() => { onSelectFolder(null); onClose(); }} className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold transition-colors ${activeFolderId === null ? 'bg-[hsl(var(--sidebar-accent))] text-[hsl(var(--sidebar-accent-foreground))]' : 'text-[hsl(var(--sidebar-foreground)/.72)] hover:bg-[hsl(var(--sidebar-accent)/.7)]'}`} data-testid="button-folder-all"><HardDrive size={17} className={activeFolderId === null ? 'text-[hsl(var(--accent))]' : ''} /> All files <span className="ml-auto font-mono text-[10px] opacity-55">{storage?.fileCount ?? '—'}</span></button>
         <div className="mt-1 max-h-[36vh] space-y-1 overflow-auto scrollbar-thin">
-          {folders.map((folder) => <div key={folder.id} className="group flex items-center gap-1"><button onClick={() => { onSelectFolder(folder.id); onClose(); }} className={`flex min-w-0 flex-1 items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-medium transition-colors ${activeFolderId === folder.id ? 'bg-[hsl(var(--sidebar-accent))] text-[hsl(var(--sidebar-accent-foreground))]' : 'text-[hsl(var(--sidebar-foreground)/.68)] hover:bg-[hsl(var(--sidebar-accent)/.7)]'}`} data-testid={`button-folder-${folder.id}`}><Folder size={17} className="shrink-0 text-[hsl(var(--accent)/.82)]" /><span className="truncate">{folder.name}</span></button><span className="invisible text-[hsl(var(--sidebar-foreground)/.5)] group-hover:visible"><GripVertical size={13} /></span></div>)}
+          {folders.map((folder) => (
+            <div key={folder.id} className="group flex items-center gap-1" style={{ paddingLeft: folder.parentFolderId ? 14 : 0 }}>
+              <button onClick={() => { onSelectFolder(folder.id); onClose(); }} className={`flex min-w-0 flex-1 items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-medium transition-colors ${activeFolderId === folder.id ? 'bg-[hsl(var(--sidebar-accent))] text-[hsl(var(--sidebar-accent-foreground))]' : 'text-[hsl(var(--sidebar-foreground)/.68)] hover:bg-[hsl(var(--sidebar-accent)/.7)]'}`} data-testid={`button-folder-${folder.id}`}>
+                <Folder size={17} className="shrink-0 text-[hsl(var(--accent)/.82)]" />
+                <span className="truncate">{folder.name}</span>
+              </button>
+            </div>
+          ))}
         </div>
         <button onClick={onNewFolder} className="mt-3 flex items-center gap-2 px-3 text-xs font-semibold text-[hsl(var(--sidebar-foreground)/.5)] transition-colors hover:text-[hsl(var(--accent))]" data-testid="button-sidebar-new-folder"><Plus size={14} /> Add a room</button>
       </div>
@@ -444,14 +574,14 @@ function WorkspaceSidebar({ activeFolderId, folders, storage, onSelectFolder, on
   );
 }
 
-function FileRow({ file, folders, onRename, onMove, onDelete, onDownload }: { file: any; folders: any[]; onRename: () => void; onMove: () => void; onDelete: () => void; onDownload: () => void }) {
+function FileRow({ file, onRename, onMove, onDelete, onDownload, onPreview }: { file: any; folders?: any[]; onRename: () => void; onMove: () => void; onDelete: () => void; onDownload: () => void; onPreview: () => void }) {
   const Icon = iconForMime(file.mimeType);
   return (
     <div className="group grid grid-cols-[minmax(0,1fr)_110px_120px_40px] items-center gap-3 border-b border-[hsl(var(--border)/.7)] px-4 py-3.5 transition-colors hover:bg-[hsl(var(--secondary)/.38)] sm:px-5" data-testid={`row-file-${file.id}`}>
       <div className="flex min-w-0 items-center gap-3"><div className="grid size-10 shrink-0 place-items-center rounded-xl bg-[hsl(var(--primary)/.1)] text-[hsl(var(--primary))]"><Icon size={18} strokeWidth={1.8} /></div><div className="min-w-0"><p className="truncate text-sm font-semibold">{file.name}</p><p className="mt-0.5 truncate text-[11px] text-[hsl(var(--muted-foreground))]">{file.folderPath || 'All files'} · {file.originalName}</p></div></div>
       <span className="hidden text-xs text-[hsl(var(--muted-foreground))] sm:block">{formatBytes(file.fileSize)}</span>
       <span className="hidden text-xs text-[hsl(var(--muted-foreground))] md:block">{formatDate(file.updatedAt)}</span>
-      <div className="relative flex justify-end"><button className="rounded-lg p-2 text-[hsl(var(--muted-foreground))] opacity-70 transition-colors hover:bg-[hsl(var(--muted))] hover:text-[hsl(var(--foreground))] group-hover:opacity-100" data-testid={`button-file-menu-${file.id}`}><MoreHorizontal size={17} /></button><div className="invisible absolute right-0 top-10 z-10 w-40 translate-y-1 rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-1 opacity-0 shadow-[var(--shadow-md)] transition-all group-focus-within:visible group-focus-within:translate-y-0 group-focus-within:opacity-100 group-hover:visible group-hover:translate-y-0 group-hover:opacity-100"><button onClick={onDownload} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-[hsl(var(--muted))]" data-testid={`button-download-${file.id}`}><ArrowDownToLine size={14} /> Download</button><button onClick={onRename} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-[hsl(var(--muted))]" data-testid={`button-rename-${file.id}`}><Pencil size={14} /> Rename</button><button onClick={onMove} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-[hsl(var(--muted))]" data-testid={`button-move-${file.id}`}><Folder size={14} /> Move to folder</button><button onClick={onDelete} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-[hsl(var(--destructive))] hover:bg-[hsl(var(--destructive)/.08)]" data-testid={`button-delete-${file.id}`}><Trash2 size={14} /> Delete</button></div></div>
+      <div className="relative flex justify-end"><button className="rounded-lg p-2 text-[hsl(var(--muted-foreground))] opacity-70 transition-colors hover:bg-[hsl(var(--muted))] hover:text-[hsl(var(--foreground))] group-hover:opacity-100" data-testid={`button-file-menu-${file.id}`}><MoreHorizontal size={17} /></button><div className="invisible absolute right-0 top-10 z-10 w-40 translate-y-1 rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-1 opacity-0 shadow-[var(--shadow-md)] transition-all group-focus-within:visible group-focus-within:translate-y-0 group-focus-within:opacity-100 group-hover:visible group-hover:translate-y-0 group-hover:opacity-100"><button onClick={onPreview} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-[hsl(var(--muted))]"><Eye size={14} /> Open / preview</button><button onClick={onDownload} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-[hsl(var(--muted))]" data-testid={`button-download-${file.id}`}><ArrowDownToLine size={14} /> Download</button><button onClick={onRename} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-[hsl(var(--muted))]" data-testid={`button-rename-${file.id}`}><Pencil size={14} /> Rename</button><button onClick={onMove} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-[hsl(var(--muted))]" data-testid={`button-move-${file.id}`}><Folder size={14} /> Move to folder</button><button onClick={onDelete} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-[hsl(var(--destructive))] hover:bg-[hsl(var(--destructive)/.08)]" data-testid={`button-delete-${file.id}`}><Trash2 size={14} /> Delete</button></div></div>
     </div>
   );
 }
@@ -469,6 +599,9 @@ function Dashboard() {
   const [view, setView] = useState<'list' | 'grid'>('list');
   const [notice, setNotice] = useState('');
   const [uploadProgress, setUploadProgress] = useState('');
+  const [preview, setPreview] = useState<{ name: string; mime: string; url: string } | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const uploadAbort = useRef<XMLHttpRequest | null>(null);
   const [downloadTarget, setDownloadTarget] = useState<string | null>(null);
   const [folderName, setFolderName] = useState('');
   const [editName, setEditName] = useState('');
@@ -507,24 +640,61 @@ function Dashboard() {
 
   const invalidateFiles = () => { qc.invalidateQueries({ queryKey: getListFilesQueryKey() }); qc.invalidateQueries({ queryKey: getGetStorageSummaryQueryKey() }); };
   const openUpload = () => uploadInput.current?.click();
-  const onUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = '';
-    if (!file) return;
-    setNotice('');
-    setUploadProgress('Preparing a private upload…');
-    requestUploadUrl.mutate({ data: { name: file.name, contentType: file.type || 'application/octet-stream', fileSize: file.size } }, {
-      onSuccess: async (upload) => {
-        try {
-          setUploadProgress('Encrypting the handoff…');
-          const result = await fetch(upload.uploadUrl, { method: 'PUT', headers: { 'Content-Type': file.type || 'application/octet-stream' }, body: file });
-          if (!result.ok) throw new Error('The upload could not be completed.');
-          setUploadProgress('Saving file details…');
-          createFile.mutate({ data: { name: file.name, originalName: file.name, storagePath: upload.storagePath, mimeType: file.type || 'application/octet-stream', fileSize: file.size, folderId: activeFolderId } }, { onSuccess: () => { setUploadProgress(''); setNotice(`${file.name} is safely in your cloud.`); invalidateFiles(); }, onError: (error) => { setUploadProgress(''); setNotice(getErrorMessage(error)); } });
-        } catch (error) { setUploadProgress(''); setNotice(getErrorMessage(error)); }
-      },
-      onError: (error) => { setUploadProgress(''); setNotice(getErrorMessage(error)); },
+  const uploadOne = async (file: File) => {
+    if (file.size > 50 * 1024 * 1024) throw new Error(`${file.name} is larger than 50 MB.`);
+    const upload = await new Promise<{ uploadUrl: string; storagePath: string }>((resolve, reject) => {
+      requestUploadUrl.mutate({ data: { name: file.name, contentType: file.type || 'application/octet-stream', fileSize: file.size } }, { onSuccess: resolve, onError: reject });
     });
+    await new Promise<void>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      uploadAbort.current = xhr;
+      xhr.open('PUT', upload.uploadUrl);
+      xhr.withCredentials = true;
+      xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) setUploadProgress(`Uploading ${file.name}… ${Math.round((event.loaded / event.total) * 100)}%`);
+      };
+      xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error('The upload could not be completed.')));
+      xhr.onerror = () => reject(new Error('The upload could not be completed.'));
+      xhr.onabort = () => reject(new Error('Upload cancelled.'));
+      xhr.send(file);
+    });
+    await new Promise<void>((resolve, reject) => {
+      createFile.mutate({ data: { name: file.name, originalName: file.name, storagePath: upload.storagePath, mimeType: file.type || 'application/octet-stream', fileSize: file.size, folderId: activeFolderId } }, { onSuccess: () => resolve(), onError: reject });
+    });
+  };
+  const uploadFiles = async (list: FileList | File[]) => {
+    const filesToUpload = Array.from(list);
+    if (!filesToUpload.length) return;
+    setNotice('');
+    try {
+      for (const file of filesToUpload) {
+        setUploadProgress(`Preparing ${file.name}…`);
+        await uploadOne(file);
+      }
+      setUploadProgress('');
+      setNotice(filesToUpload.length === 1 ? `${filesToUpload[0].name} is safely in your cloud.` : `${filesToUpload.length} files are safely in your cloud.`);
+      invalidateFiles();
+    } catch (error) {
+      setUploadProgress('');
+      setNotice(getErrorMessage(error));
+    } finally {
+      uploadAbort.current = null;
+    }
+  };
+  const onUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const list = event.target.files;
+    event.target.value = '';
+    if (list) await uploadFiles(list);
+  };
+  const openPreview = async (file: { id: string; name: string; mimeType: string }) => {
+    try {
+      const result = await apiRequest<{ url: string }>(`/api/files/${file.id}/download`);
+      if (!result.url) throw new Error('Preview unavailable');
+      setPreview({ name: file.name, mime: file.mimeType, url: result.url });
+    } catch (error) {
+      setNotice(getErrorMessage(error));
+    }
   };
   const onCreateFolder = (event: FormEvent) => {
     event.preventDefault();
@@ -559,8 +729,13 @@ function Dashboard() {
       {sidebarOpen && <button className="fixed inset-0 z-20 bg-[hsl(var(--sidebar)/.46)] lg:hidden" onClick={() => setSidebarOpen(false)} aria-label="Close navigation" data-testid="button-sidebar-overlay" />}
       <section className="min-w-0 flex-1">
         <WorkspaceHeader user={session.user} search={search} setSearch={setSearch} onUpload={openUpload} onNewFolder={() => setModal({ type: 'folder' })} onLock={onLock} onLogout={onLogout} onToggleSidebar={() => setSidebarOpen(true)} />
-        <input ref={uploadInput} type="file" className="hidden" onChange={onUpload} data-testid="input-upload-file" />
-        <main className="mx-auto max-w-[1440px] px-5 py-8 sm:px-8 lg:px-10 lg:py-11">
+        <input ref={uploadInput} type="file" multiple className="hidden" onChange={onUpload} data-testid="input-upload-file" />
+        <main
+          className="mx-auto max-w-[1440px] px-5 py-8 sm:px-8 lg:px-10 lg:py-11"
+          onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={(event) => { event.preventDefault(); setDragging(false); if (event.dataTransfer.files.length) void uploadFiles(event.dataTransfer.files); }}
+        >
           <div className="mb-9 flex flex-col justify-between gap-5 md:flex-row md:items-end">
             <div><div className="mb-3 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[.18em] text-[hsl(var(--muted-foreground))]"><span className="size-1.5 rounded-full bg-[hsl(var(--accent))]" /> {health.data?.status === 'ok' ? 'Cloud online' : 'Your private cloud'}</div><h1 className="font-serif text-[44px] font-bold leading-none tracking-[-.06em] sm:text-[54px]">{activeFolderId ? folders.find((folder: any) => folder.id === activeFolderId)?.name || 'Room' : 'All files'}</h1><p className="mt-3 text-sm text-[hsl(var(--muted-foreground))]">{search ? `Showing results for “${search}”` : 'Everything you keep close, in one calm place.'}</p></div>
             <div className="flex items-center gap-2 rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--card)/.55)] p-1"><button onClick={() => setView('list')} className={`rounded-lg p-2 ${view === 'list' ? 'bg-[hsl(var(--secondary))] text-[hsl(var(--foreground))]' : 'text-[hsl(var(--muted-foreground))]'}`} data-testid="button-view-list"><List size={16} /></button><button onClick={() => setView('grid')} className={`rounded-lg p-2 ${view === 'grid' ? 'bg-[hsl(var(--secondary))] text-[hsl(var(--foreground))]' : 'text-[hsl(var(--muted-foreground))]'}`} data-testid="button-view-grid"><LayoutGrid size={16} /></button></div>
@@ -570,10 +745,10 @@ function Dashboard() {
             <div className="rounded-2xl border border-[hsl(var(--border))] bg-[hsl(var(--card)/.67)] p-5 shadow-[var(--shadow-2xs)]"><div className="mb-4 flex items-center justify-between"><span className="text-xs font-semibold text-[hsl(var(--muted-foreground))]">Storage used</span><HardDrive size={16} className="text-[hsl(var(--destructive))]" /></div><p className="font-serif text-3xl font-bold">{formatBytes(storageQuery.data?.usedBytes)}</p><p className="mt-1 text-[11px] text-[hsl(var(--muted-foreground))]">of {formatBytes(storageQuery.data?.quotaBytes)} available</p></div>
             <div className="rounded-2xl bg-[hsl(var(--primary))] p-5 text-[hsl(var(--primary-foreground))] shadow-[0_14px_30px_hsl(var(--primary)/.18)]"><div className="mb-3 flex items-center justify-between"><span className="text-xs font-semibold text-[hsl(var(--primary-foreground)/.7)]">Private by design</span><ShieldCheck size={17} className="text-[hsl(var(--accent))]" /></div><p className="max-w-[240px] font-serif text-xl font-bold leading-tight">Your files stay yours, from upload to download.</p><div className="mt-4 flex items-center gap-2 text-[10px] text-[hsl(var(--primary-foreground)/.65)]"><Check size={13} className="text-[hsl(var(--accent))]" /> No public index · No shared feed</div></div>
           </div>
-          {(notice || uploadProgress) && <div className="mb-5 flex items-center gap-3 rounded-xl border border-[hsl(var(--accent)/.4)] bg-[hsl(var(--accent)/.1)] px-4 py-3 text-xs font-medium text-[hsl(var(--foreground))]" data-testid="status-workspace"><span className={`size-2 rounded-full ${uploadProgress ? 'animate-pulse bg-[hsl(var(--accent))]' : 'bg-[hsl(var(--primary))]'}`} />{uploadProgress || notice}<button onClick={() => { setNotice(''); setUploadProgress(''); }} className="ml-auto text-[hsl(var(--muted-foreground))]" data-testid="button-dismiss-notice"><X size={15} /></button></div>}
+          {(notice || uploadProgress || dragging) && <div className="mb-5 flex items-center gap-3 rounded-xl border border-[hsl(var(--accent)/.4)] bg-[hsl(var(--accent)/.1)] px-4 py-3 text-xs font-medium text-[hsl(var(--foreground))]" data-testid="status-workspace"><span className={`size-2 rounded-full ${uploadProgress || dragging ? 'animate-pulse bg-[hsl(var(--accent))]' : 'bg-[hsl(var(--primary))]'}`} />{dragging ? 'Drop files to upload them privately.' : uploadProgress || notice}{uploadProgress && <button onClick={() => uploadAbort.current?.abort()} className="rounded-lg px-2 py-1 text-[hsl(var(--destructive))]">Cancel</button>}<button onClick={() => { setNotice(''); setUploadProgress(''); }} className="ml-auto text-[hsl(var(--muted-foreground))]" data-testid="button-dismiss-notice"><X size={15} /></button></div>}
           <div className="overflow-hidden rounded-2xl border border-[hsl(var(--border))] bg-[hsl(var(--card)/.64)] shadow-[var(--shadow-2xs)]">
             <div className="flex items-center justify-between border-b border-[hsl(var(--border))] px-4 py-4 sm:px-5"><div><h2 className="text-sm font-bold">{filesQuery.isLoading ? 'Gathering your files…' : `${files.length} ${files.length === 1 ? 'file' : 'files'}`}</h2><p className="mt-1 text-[11px] text-[hsl(var(--muted-foreground))]">Updated moments ago</p></div><button onClick={() => { filesQuery.refetch(); foldersQuery.refetch(); storageQuery.refetch(); }} className="rounded-lg p-2 text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--muted))]" data-testid="button-refresh-files"><RefreshCw size={15} /></button></div>
-            {filesQuery.isLoading ? <SkeletonRows /> : filesQuery.isError ? <div className="p-10 text-center"><p className="font-serif text-xl font-bold">Couldn’t open this room.</p><p className="mt-2 text-sm text-[hsl(var(--muted-foreground))]">{getErrorMessage(filesQuery.error)}</p><button onClick={() => filesQuery.refetch()} className="mt-5 inline-flex items-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-4 py-2.5 text-xs font-semibold text-[hsl(var(--primary-foreground))]" data-testid="button-retry-files"><RefreshCw size={14} /> Try again</button></div> : files.length === 0 ? <EmptyFiles onUpload={openUpload} /> : view === 'list' ? <><div className="hidden grid-cols-[minmax(0,1fr)_110px_120px_40px] gap-3 px-5 py-3 text-[10px] font-mono uppercase tracking-[.14em] text-[hsl(var(--muted-foreground))] sm:grid"><span>Name</span><span>Size</span><span>Modified</span><span /></div>{files.map((file: any) => <FileRow key={file.id} file={file} folders={folders} onDownload={() => setDownloadTarget(file.id)} onRename={() => { setEditName(file.name); setModal({ type: 'rename-file', id: file.id, name: file.name }); }} onMove={() => { setMoveFolderId(file.folderId || ''); setModal({ type: 'move', id: file.id, name: file.name, folderId: file.folderId }); }} onDelete={() => setModal({ type: 'delete-file', id: file.id, name: file.name })} />)}</> : <div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-3">{files.map((file: any) => { const Icon = iconForMime(file.mimeType); return <div key={file.id} className="group rounded-2xl border border-[hsl(var(--border))] p-4 transition-all hover:-translate-y-0.5 hover:border-[hsl(var(--accent)/.7)] hover:shadow-[var(--shadow-sm)]" data-testid={`card-file-${file.id}`}><div className="mb-8 flex items-start justify-between"><div className="grid size-11 place-items-center rounded-xl bg-[hsl(var(--primary)/.1)] text-[hsl(var(--primary))]"><Icon size={20} /></div><button onClick={() => setModal({ type: 'delete-file', id: file.id, name: file.name })} className="rounded-lg p-1.5 text-[hsl(var(--muted-foreground))] opacity-0 group-hover:opacity-100 hover:bg-[hsl(var(--destructive)/.1)] hover:text-[hsl(var(--destructive))]" data-testid={`button-grid-delete-${file.id}`}><Trash2 size={15} /></button></div><p className="truncate text-sm font-semibold">{file.name}</p><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">{formatBytes(file.fileSize)} · {formatDate(file.updatedAt)}</p><button onClick={() => setDownloadTarget(file.id)} className="mt-4 flex items-center gap-2 text-xs font-semibold text-[hsl(var(--primary))]" data-testid={`button-grid-download-${file.id}`}><ArrowDownToLine size={14} /> Download</button></div> })}</div>}
+            {filesQuery.isLoading ? <SkeletonRows /> : filesQuery.isError ? <div className="p-10 text-center"><p className="font-serif text-xl font-bold">Couldn’t open this room.</p><p className="mt-2 text-sm text-[hsl(var(--muted-foreground))]">{getErrorMessage(filesQuery.error)}</p><button onClick={() => filesQuery.refetch()} className="mt-5 inline-flex items-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-4 py-2.5 text-xs font-semibold text-[hsl(var(--primary-foreground))]" data-testid="button-retry-files"><RefreshCw size={14} /> Try again</button></div> : files.length === 0 ? <EmptyFiles onUpload={openUpload} /> : view === 'list' ? <><div className="hidden grid-cols-[minmax(0,1fr)_110px_120px_40px] gap-3 px-5 py-3 text-[10px] font-mono uppercase tracking-[.14em] text-[hsl(var(--muted-foreground))] sm:grid"><span>Name</span><span>Size</span><span>Modified</span><span /></div>{files.map((file: any) => <FileRow key={file.id} file={file} onPreview={() => void openPreview(file)} onDownload={() => setDownloadTarget(file.id)} onRename={() => { setEditName(file.name); setModal({ type: 'rename-file', id: file.id, name: file.name }); }} onMove={() => { setMoveFolderId(file.folderId || ''); setModal({ type: 'move', id: file.id, name: file.name, folderId: file.folderId }); }} onDelete={() => setModal({ type: 'delete-file', id: file.id, name: file.name })} />)}</> : <div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-3">{files.map((file: any) => { const Icon = iconForMime(file.mimeType); return <div key={file.id} className="group rounded-2xl border border-[hsl(var(--border))] p-4 transition-all hover:-translate-y-0.5 hover:border-[hsl(var(--accent)/.7)] hover:shadow-[var(--shadow-sm)]" data-testid={`card-file-${file.id}`}><div className="mb-8 flex items-start justify-between"><div className="grid size-11 place-items-center rounded-xl bg-[hsl(var(--primary)/.1)] text-[hsl(var(--primary))]"><Icon size={20} /></div><button onClick={() => setModal({ type: 'delete-file', id: file.id, name: file.name })} className="rounded-lg p-1.5 text-[hsl(var(--muted-foreground))] opacity-0 group-hover:opacity-100 hover:bg-[hsl(var(--destructive)/.1)] hover:text-[hsl(var(--destructive))]" data-testid={`button-grid-delete-${file.id}`}><Trash2 size={15} /></button></div><p className="truncate text-sm font-semibold">{file.name}</p><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">{formatBytes(file.fileSize)} · {formatDate(file.updatedAt)}</p><div className="mt-4 flex gap-3"><button onClick={() => void openPreview(file)} className="flex items-center gap-2 text-xs font-semibold text-[hsl(var(--primary))]"><Eye size={14} /> Preview</button><button onClick={() => setDownloadTarget(file.id)} className="flex items-center gap-2 text-xs font-semibold text-[hsl(var(--primary))]" data-testid={`button-grid-download-${file.id}`}><ArrowDownToLine size={14} /> Download</button></div></div> })}</div>}
           </div>
         </main>
       </section>
@@ -581,6 +756,26 @@ function Dashboard() {
       {(modal?.type === 'rename-file' || modal?.type === 'rename-folder') && <Modal title={`Rename ${modal.type === 'rename-file' ? 'file' : 'room'}`} onClose={() => setModal(null)}><form onSubmit={onRename}><label className="block text-xs font-semibold">New name<input autoFocus value={editName} onChange={(e) => setEditName(e.target.value)} className="focus-ring mt-2 h-12 w-full rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-4 text-sm outline-none focus:border-[hsl(var(--accent))]" data-testid="input-rename" /></label><button className="mt-5 flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] text-sm font-semibold text-[hsl(var(--primary-foreground))]" data-testid="button-save-rename"><Check size={16} /> Save change</button></form></Modal>}
       {modal?.type === 'move' && <Modal title="Move file" onClose={() => setModal(null)}><form onSubmit={onMove}><p className="mb-4 text-sm leading-5 text-[hsl(var(--muted-foreground))]">Choose a room for <strong className="text-[hsl(var(--foreground))]">{modal.name}</strong>.</p><select value={moveFolderId} onChange={(e) => setMoveFolderId(e.target.value)} className="focus-ring h-12 w-full rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-4 text-sm outline-none focus:border-[hsl(var(--accent))]" data-testid="select-move-folder"><option value="">All files</option>{folders.map((folder: any) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select><button className="mt-5 flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] text-sm font-semibold text-[hsl(var(--primary-foreground))]" data-testid="button-save-move"><Folder size={16} /> Move file</button></form></Modal>}
       {(modal?.type === 'delete-file' || modal?.type === 'delete-folder') && <Modal title={`Delete ${modal.type === 'delete-file' ? 'file' : 'room'}?`} onClose={() => setModal(null)}><p className="text-sm leading-6 text-[hsl(var(--muted-foreground))]">This will permanently remove <strong className="text-[hsl(var(--foreground))]">{modal.name}</strong>. This action cannot be undone.</p><div className="mt-6 flex gap-3"><button onClick={() => setModal(null)} className="focus-ring h-11 flex-1 rounded-xl border border-[hsl(var(--border))] text-sm font-semibold hover:bg-[hsl(var(--muted))]" data-testid="button-cancel-delete">Keep it</button><button onClick={confirmDelete} className="focus-ring h-11 flex-1 rounded-xl bg-[hsl(var(--destructive))] text-sm font-semibold text-[hsl(var(--destructive-foreground))]" data-testid="button-confirm-delete"><Trash2 size={15} className="mr-2 inline" /> Delete</button></div></Modal>}
+      {preview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[hsl(var(--sidebar)/.72)] p-4" onClick={() => setPreview(null)}>
+          <div className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-[hsl(var(--card))] p-4" onClick={(event) => event.stopPropagation()}>
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <p className="truncate text-sm font-semibold">{preview.name}</p>
+              <button onClick={() => setPreview(null)} className="rounded-lg p-1.5 hover:bg-[hsl(var(--muted))]"><X size={16} /></button>
+            </div>
+            {preview.mime.startsWith('image/') && <img src={preview.url} alt="" className="max-h-[70vh] w-full object-contain" />}
+            {preview.mime.startsWith('video/') && <video src={preview.url} controls className="max-h-[70vh] w-full" />}
+            {preview.mime.startsWith('audio/') && <audio src={preview.url} controls className="w-full" />}
+            {(preview.mime.includes('pdf') || preview.mime.startsWith('text/')) && <iframe title={preview.name} src={preview.url} className="h-[70vh] w-full rounded-xl bg-white" />}
+            {!preview.mime.startsWith('image/') && !preview.mime.startsWith('video/') && !preview.mime.startsWith('audio/') && !preview.mime.includes('pdf') && !preview.mime.startsWith('text/') && (
+              <div className="p-10 text-center">
+                <p className="font-serif text-2xl font-bold">Preview unavailable</p>
+                <a href={preview.url} target="_blank" rel="noreferrer" className="mt-4 inline-flex h-11 items-center rounded-xl bg-[hsl(var(--primary))] px-4 text-sm font-semibold text-[hsl(var(--primary-foreground))]">Download file</a>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

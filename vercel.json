@@ -1,0 +1,7 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "installCommand": "corepack enable && pnpm install",
+  "buildCommand": "pnpm --filter @workspace/private-cloud run build",
+  "outputDirectory": "artifacts/private-cloud/dist/public"
+}

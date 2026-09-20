@@ -11,6 +11,7 @@ export type SessionData = {
   vaultUnlocked: boolean;
   failedAttempts: number;
   lockedUntil?: number;
+  resetVerified?: boolean;
 };
 
 function secret(): string {
