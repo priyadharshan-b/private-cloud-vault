@@ -1,0 +1,983 @@
+# Build a Private Personal Cloud Storage Web App
+
+I want you to build a complete, production-ready private cloud storage web application using **Replit Agent**, **Supabase**, and my existing domain.
+
+The application should feel similar to a very simple private version of Google Drive, but the main purpose is secure personal/private file storage.
+
+## 1. Core concept
+
+When someone opens my domain, they should NOT immediately see the storage dashboard.
+
+The flow should be:
+
+1. Open my domain.
+2. Show a clean private login/access page.
+3. User authenticates using Supabase Auth.
+4. Authentication should initially support:
+
+   * Google Sign-In
+   * Email/password or magic-link authentication if appropriate
+5. After authentication, check whether the user has already created a private access passcode.
+6. If the user has never created a passcode:
+
+   * Show "Create your private passcode".
+   * Let the user create a passcode.
+   * Confirm the passcode.
+   * Store ONLY a secure hash of the passcode.
+7. If the user already has a passcode:
+
+   * Ask them to enter the passcode.
+   * Only after the correct passcode is entered should they access the storage dashboard.
+8. The passcode belongs to the authenticated user.
+9. Different authenticated users must have completely separate storage and accounts.
+10. Users must never be able to see another user's files.
+
+The passcode is an additional application-level security layer. **Do NOT use the passcode as the Supabase Auth password.**
+
+---
+
+# 2. Authentication
+
+Use **Supabase Auth**.
+
+Initially implement:
+
+### Google authentication
+
+A user should be able to click:
+
+"Continue with Google"
+
+and authenticate through Supabase.
+
+Also provide an email-based authentication option so that account recovery is possible.
+
+After successful authentication:
+
+```text
+User
+ ↓
+Supabase Authentication
+ ↓
+Check profile
+ ↓
+Does private passcode exist?
+ ├── No → Create passcode
+ └── Yes → Enter passcode
+ ↓
+Storage Dashboard
+```
+
+Do not allow an unauthenticated user to access the dashboard.
+
+---
+
+# 3. Private passcode system
+
+Every user should have their own private passcode.
+
+Example:
+
+User A:
+
+```text
+Google account → user A
+Private passcode → 824619
+Files → User A's files only
+```
+
+User B:
+
+```text
+Google account → user B
+Private passcode → 391572
+Files → User B's files only
+```
+
+The same application/domain can support multiple users, but each user must have completely isolated data.
+
+### Passcode requirements
+
+Allow the user to create a passcode.
+
+Prefer a 6-digit numeric passcode initially.
+
+Add:
+
+* Passcode
+* Confirm passcode
+* Show/hide passcode
+* Basic validation
+* Prevent empty passcodes
+* Prevent obviously invalid values such as `000000`
+* Rate-limit incorrect attempts
+* Temporary lockout after too many failed attempts
+
+Do NOT store the raw passcode in the database.
+
+Use a secure password hashing mechanism such as Argon2id or another appropriate server-side password hashing method.
+
+The database should contain something similar to:
+
+```text
+passcode_hash
+```
+
+and never:
+
+```text
+passcode
+```
+
+---
+
+# 4. Passcode reset
+
+If the user forgets their passcode:
+
+Show:
+
+"Forgot passcode?"
+
+The user must already be authenticated through their registered Google/email account.
+
+The recovery flow should be:
+
+```text
+Forgot passcode
+       ↓
+Verify authenticated account
+       ↓
+Send recovery email / require recent authentication
+       ↓
+Reset private passcode
+       ↓
+Create new passcode
+       ↓
+Return to storage dashboard
+```
+
+Do not allow someone who only knows another user's email address to reset their passcode.
+
+Use Supabase Auth's secure recovery mechanisms.
+
+After a successful reset, invalidate any old passcode session/access state.
+
+---
+
+# 5. Storage dashboard
+
+After successful authentication + correct passcode, show the main dashboard.
+
+The dashboard should feel like a simple private cloud drive.
+
+Main sections:
+
+### Header
+
+Show:
+
+* Application logo/name
+* Search
+* User profile
+* User email/name
+* Logout
+* Lock storage
+
+### Main dashboard
+
+Show:
+
+```text
+My Storage
+
+[ Upload Files ]   [ New Folder ]
+
+Recent Files
+```
+
+Display recently uploaded files.
+
+Each file should show:
+
+* File name
+* File type
+* File size
+* Uploaded date
+* Updated date
+* Folder/path
+* Actions
+
+Actions:
+
+* Open / preview
+* Download
+* Rename
+* Delete
+* Move
+* Copy link if appropriate
+
+---
+
+# 6. File upload
+
+Create a prominent:
+
+```text
++ Upload Files
+```
+
+button.
+
+Support:
+
+* Single file upload
+* Multiple file upload
+* Drag and drop
+* Upload progress
+* Upload cancellation if practical
+* Upload error handling
+* File size validation
+* File type information
+
+After upload, immediately update the dashboard.
+
+Show:
+
+```text
+Uploading...
+████████████░░░ 80%
+
+Completed
+```
+
+---
+
+# 7. Supabase Storage architecture
+
+Use **Supabase Storage** for the actual files.
+
+Do NOT store uploaded files directly inside PostgreSQL.
+
+Use a private Supabase Storage bucket, for example:
+
+```text
+user-files
+```
+
+Each user's files must be stored inside a user-specific path.
+
+For example:
+
+```text
+user-files/
+    USER_ID_1/
+        documents/
+        images/
+        videos/
+
+    USER_ID_2/
+        documents/
+        images/
+        videos/
+```
+
+Use the authenticated Supabase user ID to isolate storage.
+
+Example:
+
+```text
+user-files/{user_id}/filename.ext
+```
+
+Implement proper Supabase Storage Row Level Security/storage policies so that:
+
+```text
+User A → can access only User A files
+User B → can access only User B files
+```
+
+Never rely only on frontend filtering for security.
+
+---
+
+# 8. File metadata database
+
+Create a PostgreSQL table in Supabase for file metadata.
+
+For example:
+
+```sql
+files
+```
+
+Suggested fields:
+
+```text
+id
+user_id
+name
+original_name
+storage_path
+mime_type
+file_size
+folder_id
+created_at
+updated_at
+```
+
+Use:
+
+```text
+user_id → authenticated Supabase user ID
+```
+
+Create Row Level Security policies.
+
+Users should only be able to:
+
+* SELECT their own files
+* INSERT their own metadata
+* UPDATE their own files
+* DELETE their own files
+
+Never allow a user to access another user's metadata.
+
+---
+
+# 9. Folder system
+
+Implement a simple folder system.
+
+Users should be able to:
+
+```text
++ New Folder
+```
+
+Example:
+
+```text
+My Storage
+
+Documents
+Photos
+Videos
+Projects
+College
+```
+
+Create a database table such as:
+
+```text
+folders
+```
+
+with:
+
+```text
+id
+user_id
+name
+parent_folder_id
+created_at
+updated_at
+```
+
+Support nested folders if practical.
+
+Example:
+
+```text
+Projects
+   └── Website
+       └── Assets
+```
+
+---
+
+# 10. Recent files
+
+The dashboard should show the most recently uploaded/modified files.
+
+Sort using:
+
+```text
+updated_at DESC
+```
+
+Show perhaps the latest 10–20 files.
+
+Provide:
+
+```text
+View all files
+```
+
+---
+
+# 11. Search
+
+Add a search box.
+
+The user should be able to search their own files by:
+
+* filename
+* file type
+* folder
+
+Search must only return files belonging to the authenticated user.
+
+---
+
+# 12. File preview
+
+For common file types, provide previews.
+
+Support where practical:
+
+* Images
+* PDF
+* Text files
+* Videos
+* Audio
+
+For unsupported file types, show:
+
+```text
+Preview unavailable
+
+[ Download File ]
+```
+
+Do not expose private storage URLs permanently.
+
+Use secure signed URLs where appropriate.
+
+---
+
+# 13. Storage information
+
+Add a storage information section.
+
+Example:
+
+```text
+Storage
+
+Used:
+1.8 GB
+
+Files:
+42
+
+Available:
+...
+```
+
+Calculate storage usage from the user's files.
+
+Do not hardcode storage values.
+
+---
+
+# 14. Security requirements
+
+This is extremely important.
+
+Implement:
+
+### Authentication security
+
+* Supabase Auth
+* Protected routes
+* Secure session handling
+* Logout
+* Session expiration handling
+
+### Passcode security
+
+* Never store raw passcodes
+* Hash passcodes securely
+* Rate-limit attempts
+* Temporary lockout after repeated failures
+* Do not expose passcode hashes to the frontend
+* Do not place passcodes in localStorage
+* Do not put passcodes in URLs
+* Do not log passcodes
+
+### Database security
+
+Enable Supabase Row Level Security.
+
+Every user-specific table must have policies based on:
+
+```sql
+auth.uid()
+```
+
+### Storage security
+
+Supabase Storage policies must ensure users can only access their own storage paths.
+
+Never rely on frontend checks alone.
+
+---
+
+# 15. Lock button
+
+Add a:
+
+```text
+🔒 Lock
+```
+
+button to the dashboard.
+
+When clicked:
+
+```text
+Dashboard
+   ↓
+Lock
+   ↓
+Private passcode screen
+```
+
+The Supabase authentication session can remain active, but the application should require the private passcode again before showing private files.
+
+This is similar to locking a private vault.
+
+---
+
+# 16. UI/UX design
+
+Make the interface modern, minimal, and responsive.
+
+Design inspiration:
+
+* Google Drive
+* Dropbox
+* OneDrive
+* Modern SaaS dashboards
+
+But do NOT copy their branding.
+
+Use:
+
+* Clean layout
+* Sidebar
+* Dashboard cards
+* File icons
+* Search
+* Upload button
+* Responsive design
+* Desktop-first but mobile responsive
+
+The login/passcode screen should look like a private vault.
+
+Example:
+
+```text
+             🔐
+
+       Private Storage
+
+    Your files. Your space.
+
+    [ Continue with Google ]
+
+             or
+
+    [ Email ]
+
+    ------------------
+
+    Secure private access
+```
+
+Passcode screen:
+
+```text
+             🔐
+
+       Enter Passcode
+
+    ○ ○ ○ ○ ○ ○
+
+    [ Unlock Storage ]
+
+       Forgot passcode?
+```
+
+---
+
+# 17. Suggested application architecture
+
+Use a modern production-ready stack.
+
+Frontend:
+
+```text
+React
+TypeScript
+Tailwind CSS
+```
+
+Backend:
+
+```text
+Supabase
+```
+
+Authentication:
+
+```text
+Supabase Auth
+```
+
+Database:
+
+```text
+Supabase PostgreSQL
+```
+
+File storage:
+
+```text
+Supabase Storage
+```
+
+Use server-side/API routes where needed for security-sensitive operations.
+
+Do not expose Supabase service-role credentials in frontend code.
+
+---
+
+# 18. Environment variables
+
+Use environment variables.
+
+Example:
+
+```env
+VITE_SUPABASE_URL=
+VITE_SUPABASE_ANON_KEY=
+```
+
+If server-side secrets are required:
+
+```env
+SUPABASE_SERVICE_ROLE_KEY=
+```
+
+The service-role key must NEVER be exposed to the browser.
+
+Create a proper `.env.example` file.
+
+---
+
+# 19. Database schema
+
+Create the required Supabase SQL migrations.
+
+At minimum:
+
+```text
+profiles
+files
+folders
+```
+
+For example:
+
+### profiles
+
+```text
+id
+email
+full_name
+avatar_url
+passcode_hash
+passcode_created_at
+created_at
+updated_at
+```
+
+The `id` should correspond to the Supabase authenticated user ID.
+
+### folders
+
+```text
+id
+user_id
+name
+parent_folder_id
+created_at
+updated_at
+```
+
+### files
+
+```text
+id
+user_id
+folder_id
+name
+original_name
+storage_path
+mime_type
+file_size
+created_at
+updated_at
+```
+
+Add appropriate indexes.
+
+Add foreign keys.
+
+Add RLS policies.
+
+---
+
+# 20. First-time user flow
+
+Test this exact flow:
+
+```text
+Open domain
+        ↓
+Login
+        ↓
+Google authentication
+        ↓
+First-time user detected
+        ↓
+Create private passcode
+        ↓
+Confirm passcode
+        ↓
+Passcode securely hashed
+        ↓
+Storage dashboard
+```
+
+---
+
+# 21. Returning user flow
+
+```text
+Open domain
+        ↓
+Already authenticated?
+        ↓
+Yes
+        ↓
+Enter private passcode
+        ↓
+Correct?
+ ├── No → Show error + rate limit
+ └── Yes
+        ↓
+Storage dashboard
+```
+
+---
+
+# 22. New device flow
+
+If the user opens the application on a new device:
+
+```text
+Google login
+      ↓
+Private passcode
+      ↓
+Storage access
+```
+
+Do not automatically trust a new device just because the email is known.
+
+---
+
+# 23. Logout
+
+Provide:
+
+```text
+Logout
+```
+
+This should sign the user out from Supabase Auth.
+
+After logout:
+
+```text
+Domain
+ ↓
+Login page
+```
+
+---
+
+# 24. Error handling
+
+Handle:
+
+* Invalid Google login
+* Invalid email/password
+* Incorrect passcode
+* Too many passcode attempts
+* Expired session
+* Upload failure
+* Network failure
+* Storage quota issues
+* File too large
+* Unsupported file
+* Deleted file
+* Missing file
+* Permission denied
+
+Use clear user-friendly messages.
+
+Do not expose internal database/server errors to users.
+
+---
+
+# 25. Domain deployment
+
+The application will eventually be connected to my existing custom domain.
+
+Prepare the application for deployment on Replit.
+
+Give me the exact DNS records I need to configure after deployment.
+
+Do not assume the DNS provider.
+
+---
+
+# 26. Development requirements
+
+Before saying the project is complete:
+
+1. Install all dependencies.
+2. Create the complete project structure.
+3. Create Supabase SQL schema.
+4. Create RLS policies.
+5. Create Storage policies.
+6. Implement authentication.
+7. Implement passcode creation.
+8. Implement secure passcode verification.
+9. Implement passcode reset.
+10. Implement dashboard.
+11. Implement upload.
+12. Implement download.
+13. Implement delete.
+14. Implement rename.
+15. Implement folders.
+16. Implement search.
+17. Implement recent files.
+18. Implement file metadata.
+19. Implement lock functionality.
+20. Test user isolation.
+21. Test logout.
+22. Test refresh/session handling.
+23. Test mobile responsiveness.
+24. Check for obvious security vulnerabilities.
+
+---
+
+# 27. Important security test
+
+Create two test users:
+
+```text
+User A
+User B
+```
+
+Upload files for both.
+
+Verify:
+
+```text
+User A → sees only User A files
+User B → sees only User B files
+```
+
+Try accessing User B's file using User A's account.
+
+It MUST fail.
+
+Also test direct manipulation of:
+
+```text
+user_id
+storage_path
+file_id
+folder_id
+```
+
+from the browser/API.
+
+The backend/database/storage security must prevent unauthorized access.
+
+---
+
+# 28. Do not overcomplicate the first version
+
+Build a solid MVP first.
+
+Version 1 should focus on:
+
+```text
+Authentication
+        +
+Private passcode
+        +
+Secure user isolation
+        +
+File upload
+        +
+File listing
+        +
+Download
+        +
+Delete
+        +
+Rename
+        +
+Folders
+        +
+Search
+        +
+Recent files
+        +
+Lock
+```
+
+Do not add unnecessary features such as sharing, public links, collaboration, comments, or team accounts until the core system is stable.
+
+---
+
+# 29. Final deliverables
+
+When finished, give me:
+
+1. Complete working application.
+2. Project directory structure.
+3. Supabase SQL schema.
+4. RLS policies.
+5. Storage policies.
+6. Required environment variables.
+7. Exact Supabase configuration steps.
+8. Google OAuth configuration steps.
+9. Replit deployment instructions.
+10. Custom-domain DNS instructions.
+11. Test account procedure.
+12. Security checklist.
+13. Explanation of how each major component works.
+
+If something requires me to manually configure Supabase, Google OAuth, Replit, or DNS, clearly tell me exactly what I need to click/configure.
+
+Do not just generate the UI. Implement the actual authentication, database, storage, security policies, and working file operations.
