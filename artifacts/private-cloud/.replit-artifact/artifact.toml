@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Private Cloud"
+description = "A private personal cloud storage app with authenticated access, an additional vault passcode, isolated file metadata, folders, search, recent files, and secure file operations."
+version = "1.0.0"
+id = "artifacts/private-cloud"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 22540
+
+[services.development]
+run = "pnpm --filter @workspace/private-cloud run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/private-cloud", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/private-cloud/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22540"
+BASE_PATH = "/"

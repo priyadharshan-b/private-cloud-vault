@@ -10,6 +10,14 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: auth
+    description: Authentication and private vault access
+  - name: files
+    description: Private file operations
+  - name: folders
+    description: Private folder operations
+  - name: storage
+    description: Storage summaries and upload preparation
 paths:
   /healthz:
     get:
@@ -24,7 +32,331 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /auth/session:
+    get:
+      operationId: getAuthSession
+      tags: [auth]
+      summary: Get the current authentication and vault session
+      responses:
+        "200":
+          description: Current session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSession"
+  /auth/login:
+    post:
+      operationId: loginWithEmail
+      tags: [auth]
+      summary: Sign in with email and password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailLoginInput"
+      responses:
+        "200":
+          description: Signed-in session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSession"
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /auth/google:
+    post:
+      operationId: beginGoogleLogin
+      tags: [auth]
+      summary: Start Google OAuth
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GoogleLoginInput"
+      responses:
+        "200":
+          description: OAuth redirect
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthRedirect"
+  /auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: End the current session
+      responses:
+        "204":
+          description: Logged out
+  /vault/passcode:
+    post:
+      operationId: createPasscode
+      tags: [auth]
+      summary: Create the private vault passcode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasscodeInput"
+      responses:
+        "200":
+          description: Vault unlocked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSession"
+        "400":
+          description: Invalid passcode
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /vault/unlock:
+    post:
+      operationId: unlockVault
+      tags: [auth]
+      summary: Unlock the private vault
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasscodeInput"
+      responses:
+        "200":
+          description: Vault unlocked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSession"
+        "401":
+          description: Incorrect passcode
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Temporarily locked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /vault/lock:
+    post:
+      operationId: lockVault
+      tags: [auth]
+      summary: Lock the private vault
+      responses:
+        "200":
+          description: Vault locked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSession"
+  /files:
+    get:
+      operationId: listFiles
+      tags: [files]
+      summary: List the current user's files
+      parameters:
+        - name: search
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: folderId
+          in: query
+          required: false
+          schema:
+            type: ["string", "null"]
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: File list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FileItem"
+    post:
+      operationId: createFile
+      tags: [files]
+      summary: Create file metadata after an upload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FileInput"
+      responses:
+        "201":
+          description: Created file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileItem"
+  /files/{id}:
+    patch:
+      operationId: updateFile
+      tags: [files]
+      summary: Rename or move a file
+      parameters:
+        - $ref: "#/components/parameters/FileId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FileUpdate"
+      responses:
+        "200":
+          description: Updated file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileItem"
+    delete:
+      operationId: deleteFile
+      tags: [files]
+      summary: Delete a file
+      parameters:
+        - $ref: "#/components/parameters/FileId"
+      responses:
+        "204":
+          description: Deleted
+  /files/{id}/download:
+    get:
+      operationId: getFileDownload
+      tags: [files]
+      summary: Get a secure download URL
+      parameters:
+        - $ref: "#/components/parameters/FileId"
+      responses:
+        "200":
+          description: Signed download URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadResponse"
+  /files/upload-url:
+    post:
+      operationId: requestUploadUrl
+      tags: [files]
+      summary: Request a signed upload URL
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadInput"
+      responses:
+        "200":
+          description: Upload URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResponse"
+  /folders:
+    get:
+      operationId: listFolders
+      tags: [folders]
+      summary: List the current user's folders
+      responses:
+        "200":
+          description: Folder list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FolderItem"
+    post:
+      operationId: createFolder
+      tags: [folders]
+      summary: Create a folder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FolderInput"
+      responses:
+        "201":
+          description: Created folder
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FolderItem"
+  /folders/{id}:
+    patch:
+      operationId: updateFolder
+      tags: [folders]
+      summary: Rename a folder
+      parameters:
+        - $ref: "#/components/parameters/FolderId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FolderUpdate"
+      responses:
+        "200":
+          description: Updated folder
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FolderItem"
+    delete:
+      operationId: deleteFolder
+      tags: [folders]
+      summary: Delete a folder
+      parameters:
+        - $ref: "#/components/parameters/FolderId"
+      responses:
+        "204":
+          description: Deleted
+  /storage/summary:
+    get:
+      operationId: getStorageSummary
+      tags: [storage]
+      summary: Get storage usage summary
+      responses:
+        "200":
+          description: Storage summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StorageSummary"
 components:
+  parameters:
+    FileId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    FolderId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
   schemas:
     HealthStatus:
       type: object
@@ -33,4 +365,123 @@ components:
           type: string
       required:
         - status
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
+    UserProfile:
+      type: object
+      properties:
+        id: { type: string }
+        email: { type: string }
+        fullName: { type: ["string", "null"] }
+        avatarUrl: { type: ["string", "null"] }
+      required: [id, email, fullName, avatarUrl]
+    AuthSession:
+      type: object
+      properties:
+        authenticated: { type: boolean }
+        vaultUnlocked: { type: boolean }
+        hasPasscode: { type: boolean }
+        user:
+          anyOf:
+            - $ref: "#/components/schemas/UserProfile"
+            - type: "null"
+      required: [authenticated, vaultUnlocked, hasPasscode, user]
+    EmailLoginInput:
+      type: object
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 1 }
+      required: [email, password]
+    GoogleLoginInput:
+      type: object
+      properties:
+        redirectTo: { type: ["string", "null"], format: uri }
+    AuthRedirect:
+      type: object
+      properties:
+        url: { type: string, format: uri }
+      required: [url]
+    PasscodeInput:
+      type: object
+      properties:
+        passcode: { type: string, minLength: 6, maxLength: 6, pattern: "^[0-9]{6}$" }
+      required: [passcode]
+    FileItem:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        originalName: { type: string }
+        mimeType: { type: string }
+        fileSize: { type: integer, minimum: 0 }
+        folderId: { type: ["string", "null"] }
+        folderPath: { type: string }
+        storagePath: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      required: [id, name, originalName, mimeType, fileSize, folderId, folderPath, storagePath, createdAt, updatedAt]
+    FileInput:
+      type: object
+      properties:
+        name: { type: string, minLength: 1 }
+        originalName: { type: string, minLength: 1 }
+        storagePath: { type: string, minLength: 1 }
+        mimeType: { type: string }
+        fileSize: { type: integer, minimum: 0 }
+        folderId: { type: ["string", "null"] }
+      required: [name, originalName, storagePath, mimeType, fileSize]
+    FileUpdate:
+      type: object
+      properties:
+        name: { type: ["string", "null"], minLength: 1 }
+        folderId: { type: ["string", "null"] }
+    UploadInput:
+      type: object
+      properties:
+        name: { type: string, minLength: 1 }
+        contentType: { type: string }
+        fileSize: { type: integer, minimum: 0 }
+      required: [name, contentType, fileSize]
+    UploadResponse:
+      type: object
+      properties:
+        uploadUrl: { type: string, format: uri }
+        storagePath: { type: string }
+      required: [uploadUrl, storagePath]
+    DownloadResponse:
+      type: object
+      properties:
+        url: { type: string, format: uri }
+      required: [url]
+    FolderItem:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        parentFolderId: { type: ["string", "null"] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      required: [id, name, parentFolderId, createdAt, updatedAt]
+    FolderInput:
+      type: object
+      properties:
+        name: { type: string, minLength: 1 }
+        parentFolderId: { type: ["string", "null"] }
+      required: [name]
+    FolderUpdate:
+      type: object
+      properties:
+        name: { type: string, minLength: 1 }
+      required: [name]
+    StorageSummary:
+      type: object
+      properties:
+        usedBytes: { type: integer, minimum: 0 }
+        fileCount: { type: integer, minimum: 0 }
+        quotaBytes: { type: integer, minimum: 0 }
+      required: [usedBytes, fileCount, quotaBytes]
 
